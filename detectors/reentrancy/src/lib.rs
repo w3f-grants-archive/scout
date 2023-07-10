@@ -9,7 +9,7 @@ use if_chain::if_chain;
 use rustc_hir::intravisit::{walk_expr, FnKind};
 use rustc_hir::intravisit::{walk_stmt, Visitor};
 use rustc_hir::{Body, FnDecl, HirId, Stmt};
-use rustc_hir::{Expr, ExprKind};
+use rustc_hir::{Expr, ExprKind, QPath, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
@@ -97,63 +97,6 @@ impl<'tcx> LateLintPass<'tcx> for Reentrancy {
             state_change: bool,
         }
 
-        fn check_invoke_contract_call(expr: &Expr) -> Option<Span> {
-            if_chain! {
-                if let ExprKind::MethodCall(func, _, _, _) = &expr.kind;
-                if let function_name = func.ident.name.to_string();
-                if function_name == "invoke_contract" ;
-                then {
-                        return Some(expr.span);
-                }
-            }
-            None
-        }
-        fn check_allow_reentrancy(expr: &Expr) -> bool {
-            if_chain! {
-            if let ExprKind::MethodCall(func, _, args, _) = &expr.kind;
-            if let function_name = func.ident.name.to_string();
-            if function_name.contains("set_allow_reentry");
-            then {
-                    if_chain! {
-                        if let ExprKind::Lit(lit) = &args[0].kind;
-                        if &lit.node.to_string() == "true";
-                        then {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        }
-        fn check_state_change(s: &Stmt) -> bool {
-            if_chain! {
-                if let rustc_hir::StmtKind::Semi(expr) = &s.kind;
-                if let rustc_hir::ExprKind::Assign(lhs, ..) = &expr.kind;
-                if let rustc_hir::ExprKind::Field(base, _) = lhs.kind; // self.field_name <- base: self, field_name: ident
-                if let rustc_hir::ExprKind::Path(path) = &base.kind;
-                if let rustc_hir::QPath::Resolved(None, path) = *path;
-                if path.segments.iter().any(|base| base.ident.as_str().contains("self"));                then {
-                    return true;
-                }
-            }
-            if_chain! {
-                // check access to balance.insert
-                if let rustc_hir::StmtKind::Semi(expr) = &s.kind;
-                if let rustc_hir::ExprKind::MethodCall(func, rec, ..) = &expr.kind;
-                if let function_name = func.ident.name.to_string();
-                if function_name == "insert";
-                // Fix this: checking for "balances"
-                if let rustc_hir::ExprKind::Field(base, _) = &rec.kind; // self.field_name <- base: self, field_name: ident
-                if let rustc_hir::ExprKind::Path(path) = &base.kind;
-                if let rustc_hir::QPath::Resolved(None, path) = *path;
-                if path.segments.iter().any(|base| base.ident.as_str().contains("self"));
-                then {
-                    return true;
-                }
-            }
-            false
-        }
-
         impl<'tcx> Visitor<'tcx> for ReentrantStorage {
             fn visit_stmt(&mut self, stmt: &'tcx Stmt<'tcx>) {
                 // check for an statement that modifies the state
@@ -200,7 +143,6 @@ impl<'tcx> LateLintPass<'tcx> for Reentrancy {
             span_lint_and_help(
                 cx,
                 REENTRANCY,
-                // body.value.span,
                 reentrant_storage.span.unwrap(),
                 "External calls could open the opportunity for a malicious contract to execute any arbitrary code",
                 None,
@@ -208,4 +150,72 @@ impl<'tcx> LateLintPass<'tcx> for Reentrancy {
             );
         }
     }
+}
+
+#[test]
+fn ui() {
+    dylint_testing::ui_test(
+        env!("CARGO_PKG_NAME"),
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui"),
+    );
+}
+
+fn check_invoke_contract_call(expr: &Expr) -> Option<Span> {
+    if_chain! {
+        if let ExprKind::MethodCall(func, _, _, _) = &expr.kind;
+        if let function_name = func.ident.name.to_string();
+        if function_name == "invoke_contract" ;
+        then {
+            Some(expr.span)
+        }
+        else {
+            None
+        }
+    }
+}
+
+fn check_allow_reentrancy(expr: &Expr) -> bool {
+    if_chain! {
+        if let ExprKind::MethodCall(func, _, args, _) = &expr.kind;
+        if let function_name = func.ident.name.to_string();
+        if function_name.contains("set_allow_reentry");
+        if let ExprKind::Lit(lit) = &args[0].kind;
+        if &lit.node.to_string() == "true";
+        then {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn check_state_change(s: &Stmt) -> bool {
+    if_chain! {
+        if let StmtKind::Semi(expr) = &s.kind;
+        if let ExprKind::Assign(lhs, ..) = &expr.kind;
+        if let ExprKind::Field(base, _) = lhs.kind; // self.field_name <- base: self, field_name: ident
+        if let ExprKind::Path(path) = &base.kind;
+        if let QPath::Resolved(None, path) = *path;
+        if path.segments.iter().any(|base| base.ident.as_str().contains("self"));
+        then {
+            return true;
+        }
+    }
+
+    if_chain! {
+        // check access to balance.insert
+        if let StmtKind::Semi(expr) = &s.kind;
+        if let ExprKind::MethodCall(func, rec, ..) = &expr.kind;
+        if let function_name = func.ident.name.to_string();
+        if function_name == "insert";
+        // Fix this: checking for "balances"
+        if let ExprKind::Field(base, _) = &rec.kind; // self.field_name <- base: self, field_name: ident
+        if let ExprKind::Path(path) = &base.kind;
+        if let QPath::Resolved(None, path) = *path;
+        if path.segments.iter().any(|base| base.ident.as_str().contains("self"));
+        then {
+            return true;
+        }
+    }
+    false
 }
